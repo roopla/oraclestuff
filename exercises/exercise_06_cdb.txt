@@ -1,0 +1,143 @@
+Exercise: chapter 6, performance
+
+
+1.	Start CDB environment
+
+You should have a CDB named cdba with plggable databases pdba and pdbb.
+Connect as SYS to the root container, start the CDB.
+Confirm that both pdba and pdbb are open read write.
+
+
+2.	The Resource Manager and Multitenant databases
+
+2.1	Create the CDB plan
+
+This plan will favour pdba over pdbb, set defaults for all other containers:
+
+exec dbms_resource_manager.create_pending_area;
+exec dbms_resource_manager.create_cdb_plan(plan=>'ab',comment=>'favours pdba');
+exec dbms_resource_manager.create_cdb_plan_directive(-
+plan=>'ab',pluggable_database=>'pdba',shares=>4,utilization_limit=>100,parallel_server_limit=>100);
+exec dbms_resource_manager.create_cdb_plan_directive(-
+plan=>'ab',pluggable_database=>'pdbb',shares=>1,utilization_limit=>10,parallel_server_limit=>0);
+exec dbms_resource_manager.update_cdb_default_directive(-
+plan=>'ab',new_shares=>1,new_utilization_limit=>50,new_parallel_server_limit=>20);
+exec dbms_resource_manager.validate_pending_area;
+exec dbms_resource_manager.submit_pending_area;
+
+Cage the instance within one CPU:
+alter system set cpu_count=1 scope=memory;
+
+
+2.2	Activate and test the plan
+
+In the root container:
+alter system set resource_manager_plan=ab scope=memory;
+select time_waited,con_id from v$system_event where event='resmgr:cpu quantum';
+
+Run this code as SYSTEM in pdba and pdbb:
+
+set timing on
+create table t1 as select * from all_objects;
+select time_waited,con_id from v$system_event where event='resmgr:cpu quantum';
+
+Is there a difference in execution time? Why?
+
+2.3	Tidy up
+
+In the root, disable the cdb plan:
+alter system set resource_manager_plan='' scope=memory;
+exec dbms_resource_manager.create_pending_area;
+exec dbms_resource_manager.delete_cdb_plan('AB');
+exec dbms_resource_manager.submit_pending_area;
+
+
+3.	AWR activity reports
+
+3.1	Set up the test
+
+In one session:
+
+sqlplus system/oracle@pdba
+drop user work cascade;
+grant dba to work identified by work;
+conn work/work@pdba
+create table t1 as select * from all_users;
+create index i1 on t1 (user_id);
+create sequence seqnocache nocache order;
+
+create procedure queries as 
+n number;
+m number;
+begin
+loop
+select seqnocache.nextval into n from dual;
+select count(username) into m from work.t1 where user_id=n;
+end loop;
+end;
+/
+ 
+
+And in another session:
+
+sqlplus system/oracle@pdbb
+drop user work cascade;
+grant dba to work identified by work;
+conn work/work@pdbb
+create table t1 as select * from all_users;
+create index i1 on t1 (user_id);
+create sequence seqnocache nocache order;
+
+create procedure dmls as
+begin
+loop
+insert into t1(username,user_id,created) values('name',seqnocache.nextval,sysdate);
+commit;
+end loop;
+end;
+/
+
+
+3.2	Gather snapshpts, generate a workload
+
+In a third session, in the root container gather an AWR snapshot:
+exec dbms_workload_repository.create_snapshot
+
+In the other two sessions gather local snapshots and launch the procedures:
+PDBA, 
+exec dbms_workload_repository.create_snapshot
+exec queries
+
+PDBB, 
+exec dbms_workload_repository.create_snapshot
+exec dmls
+
+Let the procedures run for a few minutes, then from the root container identify and kill both sessions:
+
+select username,sid,serial#,con_id from v$session where username='WORK';
+alter system disconnect session '&sid,&serial' immediate;
+
+
+3.3	Generate reports
+
+In the root container, gather an AWR snapshot and generate a consolidated report
+covering the last two snapshots:
+exec dbms_workload_repository.create_snapshot
+@?/rdbms/admin/awrrpt.sql
+
+In PDBA and PDBB generate snapshots and local AWR reports:
+exec dbms_workload_repository.create_snapshot
+@?/rdbms/admin/awrrpt.sql and select AWR_PDB when prompted.
+
+Be sure you give the reports different names.
+
+Compare the activity in the three reports. 
+Do the figures add up?
+Where are the memory advisors?
+As ADDM aware of what is going on?
+
+ 
+
+
+
+

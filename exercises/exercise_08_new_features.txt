@@ -1,0 +1,48 @@
+Exercise: chapter 8, new features
+
+1.	Start the 21c CDB
+
+. oraenv
+cdb21
+
+sqlplus / as sysdba
+startup
+show pdbs
+select * from v$version;
+
+
+
+2.	Prepare the 19c non-CDB for upgrade and plugin
+
+. oraenv
+orcl
+
+sqlplus / as sysdba
+select cdb from v$database;
+select * from v$version;
+shu immediate
+startup open read only;
+execute dbms_pdb.describe('/home/oracle/orcl19_describe.xml')
+shu immediate
+
+
+3.	Upgrade and plugin using Replay Upgrade
+
+. oraenv
+cdb21
+
+sqlplus / as sysdba
+create pluggable database upgauto using '/home/oracle/orcl19_describe.xml' copy;
+sho pdbs
+
+alter pluggable database upgauto open;
+(38 minutes? Monitoring the alert log may help pass the time...)
+
+sho pdbs
+select * from cdb_replay_upgrade_errors;
+
+
+
+
+
+

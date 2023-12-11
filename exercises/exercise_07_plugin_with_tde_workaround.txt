@@ -1,0 +1,103 @@
+
+Plug in a non-CDB that has a TDE tablespace 
+
+Source non-CDB is orcl, destination cdb is cdba.
+
+Note: this bug,
+Bug 31310564 - PDB clone using DBLINK along with TDE encryption fails with ORA-1078 (Doc ID 31310564.8)
+means that unless your database is patched up to at least 19.10, you have to remove the tde_configuration 
+parameter for the duration of the plgin operation.
+
+1. Create the keystores
+
+!mkdir -p /u01/app/oracle/admin/orcl/wallet
+conn sys/oracle@orcl as sysdba
+alter system set wallet_root='/u01/app/oracle/admin/orcl/wallet' scope=spfile;
+startup force
+alter system set tde_configuration='keystore_configuration=file';
+administer key management create keystore identified by oracle;
+!ls -l /u01/app/oracle/admin/orcl/wallet
+administer key management create auto_login keystore from keystore '/u01/app/oracle/admin/orcl/wallet/tde' identified by oracle;
+!ls -l /u01/app/oracle/admin/orcl/wallet
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+
+!mkdir -p /u01/app/oracle/admin/cdba/wallet
+conn sys/oracle@cdba as sysdba
+alter system set wallet_root='/u01/app/oracle/admin/cdba/wallet' scope=spfile;
+startup force
+alter system set tde_configuration='keystore_configuration=file';
+administer key management create keystore identified by oracle;
+!ls -l /u01/app/oracle/admin/cdba/wallet
+administer key management create auto_login keystore from keystore '/u01/app/oracle/admin/cdba/wallet/tde' identified by oracle;
+!ls -l /u01/app/oracle/admin/cdba/wallet
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+
+
+2. Set the master keys
+
+conn sys/oracle@orcl as sysdba
+administer key management set key force keystore identified by oracle with backup using 'orclkey';
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+select con_id,encryptionalg,masterkey_activated from  v$database_key_info;
+
+conn sys/oracle@cdba as sysdba
+administer key management set key force keystore identified by oracle with backup using 'rootkey';
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+select con_id,encryptionalg,masterkey_activated from  v$database_key_info;
+
+
+3. Create a TDE tablespace in the non-CDB
+
+create tablespace encts datafile 'encts.dbf' size 10m encryption using 'aes256' encrypt;
+select * from  v$encrypted_tablespaces;
+create table system.t1 tablespace encts as select * from all_users;
+startup force;
+select count(*) from system.t1;
+
+
+4. Plugin the non-CDB
+
+conn sys/oracle@orcl as sysdba
+
+/* here we go with the bug fix! */
+alter system reset tde_configuration;
+/* remove the buggy parameter before generating the manifest file */
+
+shu immediate
+startup open read only
+exec dbms_pdb.describe(pdb_descr_file=>'/home/oracle/orcl_tde.xml');
+--vi /home/oracle/orcl_tde.xml, look for the <encts>1</encts> tags
+
+conn sys/oracle@cdba
+create pluggable database orcl_cdba as clone using '/home/oracle/orcl_tde.xml' copy;
+
+
+5. Transfer the TDE keys
+
+conn sys/oracle@orcl as sysdba
+
+/* put the parameter back, or it can't find the wallet */
+alter system set tde_configuration='keystore_configuration=file';
+/* and that's the bug work around completed */
+
+administer key management export encryption keys with secret oracle to '/home/oracle/orcl_keys.exp' force keystore identified by oracle;
+
+conn sys/oracle@cdba as sysdba
+alter session set container=orcl_cdba;
+alter database open;
+
+select * from system.t1;
+administer key management import keys with secret oracle from '/home/oracle/orcl_keys.exp' force keystore identified by oracle with backup;
+select * from system.t1;
+
+
+6. Complete the plugin
+
+conn sys/oracle@cdba as sysdba
+select name,cause,type,message,status from pdb_plug_in_violations;
+alter session set container=orcl_cdba;
+@?/rdbms/admin/noncdb_to_pdb.sql
+
+
+
+

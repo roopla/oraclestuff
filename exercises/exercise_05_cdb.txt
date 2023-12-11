@@ -1,0 +1,106 @@
+Exercise: chapter 5, Backup and recovery
+
+Backup, restore, flashback.
+
+
+1	CDB and PDB backup and restore
+
+1.1	Backup
+
+sqlplus sys/oracle@pdba as sysdba
+select log_mode from v$database;
+shutdown immediate
+
+conn / as sysdba
+shutdown immediate
+startup mount
+alter database archivelog;
+alter database open;
+conn sys/oracle@pdba as sysdba
+select log_mode from v$database;
+
+rman target sys/oracle@cdba
+backup as compressed backupset database plus archivelog delete all input;
+report schema;
+backup tablespace pdba:def_perm_a;
+
+1.2	Complete recovery of a PDB
+
+rman target sys/oracle@cdba
+alter pluggable database pdba close immediate;
+restore pluggable database pdba;
+recover pluggable database pdba;
+alter pluggable database pdba open;
+
+
+1.3	Incomplete recovery of a PDB
+
+sqlplus c##user2/oracle@pdba
+create table t1 as select * from all_users;
+select count(*) from t1;
+select current_scn from v$database;
+truncate table t1;
+
+rman target sys/oracle@cdba
+alter pluggable database pdba close immediate;
+restore pluggable database pdba until scn .... ;
+recover pluggable database pdba until scn .... ;
+
+/*
+Using shared undo mode would require an auxiliary database:
+recover pluggable database pdba until scn .... auxiliary destination;
+*/
+
+alter pluggable database pdba open resetlogs;
+
+sqlplus c##user2/oracle@pdba
+select count(*) from c##user2.t1;
+
+
+2.	Flashback in the multitenant environment
+
+2.1	Enable database flashback
+
+Connect to the root container AS SYSDBA, and enable flashback:
+select flashback_on from v$database;
+alter database flashback on;
+select flashback_on from v$database;
+
+2.2	Flashback the CDB
+
+Create a schema:
+connect system/oracle@pdba
+create user locala identified by locala;
+
+Note the SCN, in the container DB and a pluggable DB:
+connect system/oracle@cdba
+select current_scn from v$database;
+alter session set container=pdba;
+select current_scn from v$database;
+
+Drop a schema:
+drop user locala cascade;
+
+Flashback to before the drop, and confirm the recovery:
+conn / as sysdba
+shutdown abort
+startup mount
+flashback database to scn ... ;
+alter database open resetlogs;
+(alter pluggable database all open;)
+select * from cdb_users where username='LOCALA';
+
+2.3	Flashback a PDB
+
+As the database is in local undo mode, this will also be possible:
+
+alter pluggable database pdbb close immediate;
+flashback pluggable database pdbb to timestamp to_timestamp(to_char(sysdate-1/1440,'yyyy-mm-dd:hh24:mi:ss'),'yyyy-mm-dd:hh24:mi:ss');
+alter pluggable database pdbb open; --error
+alter pluggable database pdbb open resetlogs;
+
+The view v$pdb_incarnation should indicate what has happened.
+
+
+
+

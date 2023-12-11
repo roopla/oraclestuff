@@ -1,0 +1,155 @@
+There is one database! (the CDB)
+There is one instance!
+
+One DB:
+One controlfile
+One undo tablespace? (perhaps....)
+One thread of redo
+Common objects (Oracle supplied stuff)
+
+One instance:
+One set of backgrond processes
+One SGA
+One spfile
+
+What is a PDB? (pluggable container)
+A set of tablespaces
+Include a system tablespace
+Data dictionary defines all the objects within the PDB
+Undo tablespace (unless using shared undo)
+User tablespaces, segments for objects withing the PDB
+A service, registered with the listener
+
+The clever bit:
+Users request a session against a service
+listener maps the service to an isntance
+the instance maps the session to the PDB
+The scope of your session is limited to that PDB!!!
+objects defined in the PDB's data dictionary
+plus "common" objects shared from he root
+
+
+
+
+C:\Users\john>
+C:\Users\john>sqlplus system/oracle@127.0.0.1:1521/pdb2
+
+SQL*Plus: Release 19.0.0.0.0 - Production on Mon Dec 4 17:10:51 2023
+Version 19.17.0.0.0
+
+Copyright (c) 1982, 2022, Oracle. All rights reserved.
+
+Last Successful login time: Mon Dec 04 2023 16:40:44 +00:00
+
+Connected to:
+Oracle Database 19c Enterprise Edition Release 19.0.0.0.0 - Production
+Version 19.17.0.0.0
+
+127.0.0.1:1521/pdb2> sho con_name
+
+CON_NAME
+------------------------------
+PDB2
+127.0.0.1:1521/pdb2>
+
+JW
+12:11 PM
+John Watson
+to Everyone
+There is one database! (the CDB)
+There is one instance!
+
+One DB:
+One controlfile
+One undo tablespace? (perhaps....)
+One thread of redo
+Common objects (Oracle supplied stuff)
+
+One instance:
+One set of background processes
+One SGA
+One spfile
+
+What is a PDB? (pluggable container)
+A set of tablespaces
+Include a system tablespace
+Data dictionary defines all the objects within the PDB
+Undo tablespace (unless using shared undo)
+User tablespaces, segments for objects withing the PDB
+A service, registered with the listener
+
+The clever bit:
+Users request a session against a service
+listener maps the service to an isntance
+the instance maps the session to the PDB
+The scope of your session is limited to that PDB!!!
+objects defined in the PDB's data dictionary
+plus "common" objects shared from he root
+
+
+
+Trigger sys.dbms_set_pdb
+
+set oracle_sid=CDB01
+
+reg add "HKEY_LOCAL_MACHINE\SOFTWARE\ORACLE\KEY_OraDB19Home1" /v ORACLE_PDB_SID /d PDB1 /f
+reg query "HKEY_LOCAL_MACHINE\SOFTWARE\ORACLE\KEY_OraDB19Home1" /v ORACLE_PDB_SID
+
+sqlplus / as sysdba
+sho con_name
+
+reg delete "HKEY_LOCAL_MACHINE\SOFTWARE\ORACLE\KEY_OraDB19Home1" /v ORACLE_PDB_SID /f
+
+
+
+
+
+
+
+
+sqlplus / as sysdba
+alter session set container=pdb1;
+
+create directory tmp as 'c:\tmp';
+exec utl_file.fremove('TMP','Untitled.png')
+
+exec DBMS_NETWORK_ACL_ADMIN.APPEND_HOST_ACE(-
+host => '*',-
+ace => xs$ace_type(privilege_list => xs$name_list('connect', 'resolve','smtp','http'),-
+principal_name => 'PUBLIC',-
+principal_type => xs_acl.ptype_db));
+select utl_inaddr.get_host_address('zibebe.dynalias.com') from dual;
+
+--
+alter session set container=cdb$root;
+
+create lockdown profile no_os_access;
+alter lockdown profile no_os_access disable feature=('NETWORK_ACCESS', 'OS_ACCESS');
+
+alter session set container=pdb1;
+alter system set pdb_lockdown=no_os_access;
+exec utl_file.fremove('TMP','Untitled.gif')
+select utl_inaddr.get_host_address('zibebe.dynalias.com') from dual;
+
+alter system set pdb_lockdown='';
+exec utl_file.fremove('TMP','Untitled.gif')
+select utl_inaddr.get_host_address('zibebe.dynalias.com') from dual;
+
+--
+alter session set container=cdb$root;
+alter lockdown profile no_os_access disable statement=('ALTER SYSTEM');
+
+alter session set container=pdb1;
+alter system set pdb_lockdown=no_os_access;
+conn system/oracle@127.0.0.1:1521/pdb1
+alter system set pdb_lockdown='';
+
+--
+alter session set container=cdb$root;
+drop lockdown profile no_os_access;
+
+
+
+
+
+Mike Dietriche's site has some good steps for TDE conversion as part of the upgrade: https://mikedietrichde.com/

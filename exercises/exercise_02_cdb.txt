@@ -1,0 +1,112 @@
+Exercise: chapter 2, Multitenant architecture
+
+Create a container database and become familiar with some structures
+
+Starting point: Oracle Home is installed
+End point: cdba is an open container database with only the seed pluggable database
+
+1.	In an ssh shell as Linux user oracle, configure the environment
+
+export ORACLE_BASE=/u01/app/oracle
+export ORACLE_HOME=$ORACLE_BASE/product/19.0.0/dbhome_1
+export PATH=$ORACLE_HOME/bin:$PATH
+export ORACLE_SID=cdba
+
+Start the database listener:
+lsnrctl start
+
+
+2.	Create the container database
+
+Use the DBCA to create an empty CDB:
+
+dbca -silent -createDatabase                                           \
+     -templateName General_Purpose.dbc                                 \
+     -gdbname cdba -sid  cdba -responseFile NO_VALUE                   \
+     -characterSet AL32UTF8                                            \
+     -sysPassword oracle                                               \
+     -systemPassword oracle                                            \
+     -createAsContainerDatabase true                                   \
+     -numberOfPDBs 0                                                   \
+     -databaseType MULTIPURPOSE                                        \
+     -memoryMgmtType auto_sga                                          \
+     -totalMemory 1000                                                 \
+     -storageType ASM                                                  \
+     -datafileDestination +DATA                                        \
+     -redoLogFileSize 50                                               \
+     -emConfiguration NONE                                             \
+     -ignorePreReqs
+
+
+
+
+dbca -silent -createDatabase                                           \
+     -templateName General_Purpose.dbc                                 \
+     -gdbname cdba -sid  cdba -responseFile NO_VALUE                   \
+     -characterSet AL32UTF8                                            \
+     -sysPassword oracle                                               \
+     -systemPassword oracle                                            \
+     -createAsContainerDatabase true                                   \
+     -numberOfPDBs 0                                                   \
+     -databaseType MULTIPURPOSE                                        \
+     -memoryMgmtType auto_sga                                          \
+     -totalMemory 1000                                                 \
+     -storageType FS                                                   \
+     -datafileDestination /u01/app/oracle/oradata                      \
+     -redoLogFileSize 50                                               \
+     -emConfiguration NONE                                             \
+     -ignorePreReqs
+
+(typically 25 to 35 minutes)
+
+Enable OMF and FRA:
+
+mkdir /u01/app/oracle/fast_recovery_area
+sqlplus / as sysdba
+alter system set db_create_file_dest='/u01/app/oracle/oradata';
+alter system set db_recovery_file_dest_size=12g;
+alter system set db_recovery_file_dest='/u01/app/oracle/fast_recovery_area';
+
+alter system set db_create_file_dest='+DATA';
+alter system set db_recovery_file_dest_size=12g;
+alter system set db_recovery_file_dest='+FRA';
+
+
+3.	Investigate the database structures
+
+3.1 Set your environment to the new database
+. oraenv
+cdba
+
+3.2 Note the listener configuration
+lsnrctl status
+What service(s) are registered?
+
+3.3 Log on to the container database
+sqlplus / as sysdba
+
+3.4 Run a few queries
+
+select name,dbid,con_dbid,cdb,con_id from v$database;
+show parameter plug
+select con_id,guid,name,open_mode,total_size,local_undo from v$pdbs;
+select con_id,guid,name,open_mode,total_size,local_undo from v$containers;
+select pdb_id,pdb_name,con_uid,guid,status from cdb_pdbs;
+select name,con_id from v$services;  - It's not displaying GUID service name
+select con_id,name,pdb from cdb_services;
+select * from v$controlfile;
+select * from v$log;
+select * from v$logfile;
+select * from v$tablespace order by con_id;
+select con_id,tablespace_name from cdb_tablespaces order by con_id;
+select con_id,ts#,name from v$datafile;
+select con_id,tablespace_name,file_name from cdb_data_files;
+select con_id,common,oracle_maintained,username from cdb_users;
+
+alter session set "_exclude_seed_cdb_view"=false;
+select con_id,tablespace_name from cdb_tablespaces order by con_id;
+select con_id,tablespace_name,file_name from cdb_data_files;
+select con_id,common,oracle_maintained,username from cdb_users;
+
+What conclusions can you draw regarding the multitenant environment?
+Think about the scope or visibility of various objects.

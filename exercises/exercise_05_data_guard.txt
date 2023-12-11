@@ -1,0 +1,591 @@
+Exercise: Data Guard in a multitenant environment
+
+Make sure there is enough disc space in /u01 for this exercise, at least 15GB.
+To clear space, everything in /u01/stage can be removed, also all RMAN backups and archive logfiles
+and any unused databases in $ORACLE_BASE/oradata.
+
+The starting point: a CDB named cdba containing two PDBs, pdba and pdbb.
+
+The end point:
+A primary database CDBA with containers PDBA, PDBB, PDBC, PDBD, ORCLDG
+A physical standby with containers PDBA, PDBB, PDBD, ORCLDG
+
+
+1.	Configure the cdba primary database for Data Guard
+
+sqlplus / as sysdba
+shutdown immediate;
+startup mount;
+alter database archivelog;
+alter database flashback on;
+alter database force logging;
+alter database add standby logfile size 50m;
+alter database add standby logfile size 50m;
+alter database add standby logfile size 50m;
+alter database add standby logfile size 50m;
+
+
+2.	Prepare the cdba instance for Data Guard
+
+alter system set db_unique_name=cdba scope=spfile;
+alter system set db_file_name_convert='cdbb','cdba','CDBB','CDBA' scope=spfile;
+alter system set log_file_name_convert='cdbb','cdba','CDBB','CDBA' scope=spfile;
+alter system set fal_server=cdbb;
+alter system set fal_client=cdba;
+alter system set log_archive_config='dg_config=(cdba,cdbb)';
+alter system set standby_file_management=auto;
+alter system set log_archive_dest_1='location=USE_DB_RECOVERY_FILE_DEST valid_for=(all_logfiles,all_roles) db_unique_name=cdba';
+alter system set log_archive_dest_2='service=cdbb lgwr async noaffirm valid_for=(online_logfiles,primary_role) db_unique_name=cdbb';
+alter system set log_archive_dest_state_2=defer;
+
+Restart:
+
+startup force
+alter pluggable database all open;
+exit;
+
+
+3.	Configure Oarcle Net
+
+3.1	Edit the listener.ora file
+
+Add this line to $ORACLE_HOME/network/admin/listener.ora, to statically register both database instances:
+
+sid_list_listener=(sid_list=(sid_desc=(sid_name=cdba))(sid_desc=(sid_name=cdbb)))
+
+Re-start the listener, confirm that services are registered:
+
+lsnrctl stop
+lsnrctl start
+lsnrctl status
+
+3.2	Edit the tnsnames.ora file
+
+Add these entries, to create deterministic connect strings:
+cdba=(description=(address=(protocol=tcp)(host=127.0.0.1)(port=1521))(connect_data=(sid=cdba)))
+cdbb=(description=(address=(protocol=tcp)(host=127.0.0.1)(port=1521))(connect_data=(sid=cdbb)))
+
+Confirm that the names do resolve correctly and use the SID:
+
+tnsping cdba
+tnsping cdbb
+
+4.	Create the standby instance
+
+4.1	Create the parameter file for the standby database
+
+Connect to the cdba database, and generate a pfile from the spfile:
+create pfile from spfile;
+
+Copy the file:
+cd $ORACLE_HOME/dbs
+cp initcdba.ora initcdbb.ora
+
+Edits to be made to the initcdbb.ora are,
+
+Remove:
+
+cdba.__* parameters at the top of the init file.
+
+Change:
+
+audit_file_dest		replace cdba with cdbb
+control_files		replace CDBA with CDBB, twice
+db_file_name_convert	reverse the values
+db_unique_name		replace cdba with cdbb
+dispatchers		replace cdba with cdbb
+fal_client / fal_server	reverse the values
+log_archive_dest_1	replace cdba with cdbb
+log_archive_dest_2	replace cdbb with cdba, twice
+log_archive_dest_state_2	remove
+log_file_name_convert	reverse the values
+
+
+4.2	Create the standby password file and prepare the OS
+
+cp $ORACLE_HOME/dbs/orapwcdba $ORACLE_HOME/dbs/orapwcdbb
+
+mkdir -p /u01/app/oracle/admin/cdbb/adump
+mkdir /u01/app/oracle/oradata/CDBB
+
+Add to /etc/oratab,
+cdbb:/u01/app/oracle/product/19.0.0/dbhome_1:N
+
+
+4.3	Start the standby instance
+
+Connect with SQL*Plus:
+
+sqlplus sys/oracle@cdbb as sysdba
+create spfile from pfile;
+startup nomount;
+exit;
+
+
+5.	Create the standby
+
+Connect to both instances, using RMAN:
+
+rman target sys/oracle@cdba auxiliary sys/oracle@cdbb
+
+Run these commands:
+
+backup current controlfile for standby;
+backup as compressed backupset database;
+backup as compressed backupset archivelog all;
+duplicate target database for standby dorecover;
+exit;
+
+An alternative would be,
+duplicate target database for standby dorecover from active database;
+
+
+6.	Startup redo transport and apply
+
+Using SQL*Plus, start redo apply:
+
+sqlplus sys/oracle@cdbb as sysdba
+alter database recover managed standby database using current logfile disconnect from session;
+
+Start redo transport:
+
+connect sys/oracle@cdba as sysdba
+alter system set log_archive_dest_state_2=enable;
+alter system switch logfile;
+
+
+7.	Validate the configuration
+
+Perform a few log switches on the primary.
+Confirm that redo is being generated, transported, received and applied in near real-time:
+
+Run this query, repeatedly, against both databases:
+select process,status,sequence#,block# from v$managed_standby;
+
+The view v$dataguard_Stats is also useful at this point.
+
+Check that the redo destinations are valid on the primary:
+select dest_name,status,error from v$archive_dest;
+
+Observe that logfiles are being archived, on both sides:
+select name,sequence#,applied,status from v$archived_log;
+
+
+8.	Enable Active Data Guard
+
+In the standby root container:
+
+alter database recover managed standby database cancel;
+alter database open;
+alter database recover managed standby database using current logfile disconnect from session;
+select name,open_mode from v$containers;
+alter pluggable database all open;
+select name,open_mode from v$containers;
+
+lsnrctl status
+What is the problem with services?
+
+-----------------------------------------------------------------------------------------------
+This is how it looks:
+SQL> !lsnrctl status
+
+LSNRCTL for Linux: Version 19.0.0.0.0 - Production on 06-DEC-2023 18:29:57
+
+Copyright (c) 1991, 2019, Oracle.  All rights reserved.
+
+Connecting to (ADDRESS=(PROTOCOL=tcp)(HOST=)(PORT=1521))
+STATUS of the LISTENER
+------------------------
+Alias                     LISTENER
+Version                   TNSLSNR for Linux: Version 19.0.0.0.0 - Production
+Start Date                06-DEC-2023 14:06:03
+Uptime                    0 days 4 hr. 23 min. 53 sec
+Trace Level               off
+Security                  ON: Local OS Authentication
+SNMP                      OFF
+Listener Parameter File   /u01/app/oracle/product/19.0.0/dbhome_1/network/admin/listener.ora
+Listener Log File         /u01/app/oracle/diag/tnslsnr/ip-172-30-4-41/listener/alert/log.xml
+Listening Endpoints Summary...
+  (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=ip-172-30-4-41.ec2.internal)(PORT=1521)))
+Services Summary...
+Service "0bc94c2c13185e75e065102d5dea84c1" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "0bc96de12b195ee8e065102d5dea84c1" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "cdba" has 2 instance(s).
+  Instance "cdba", status UNKNOWN, has 1 handler(s) for this service...
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "cdbaXDB" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "cdbb" has 2 instance(s).
+  Instance "cdbb", status UNKNOWN, has 1 handler(s) for this service...
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "cdbbXDB" has 1 instance(s).
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "orcl" has 1 instance(s).
+  Instance "orcl", status READY, has 1 handler(s) for this service...
+Service "orclXDB" has 1 instance(s).
+  Instance "orcl", status READY, has 1 handler(s) for this service...
+Service "pdba" has 2 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "pdbb" has 2 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+The command completed successfully
+
+SQL>
+
+-------------------------------------------------------------------------------------------------------
+
+
+
+
+Check that the PDBs in the standby are (or are not) being maintained:
+
+sqlplus system/oracle@cdba
+alter session set container=pdba;
+create user u1 identified by u1;
+
+sqlplus system/oracle@cdbb
+select username,con_id from cdb_users where username like 'U%';
+
+
+9.	Sort out the services
+
+Create these services in each PDB in CDBA:
+PDBA, 
+exec dbms_service.create_service('apmy','apmy');
+exec dbms_service.create_service('asby','asby');
+
+PDBB, 
+exec dbms_service.create_service('bpmy','bpmy');
+exec dbms_service.create_service('bsby','bsby');
+
+
+Connected as SYSDBA, create this trigger in PDBA on the primary:
+
+create or replace trigger start_services after startup on database
+declare drole varchar2(20);
+begin
+select database_role into drole from v$database;
+if drole='PRIMARY' then dbms_service.start_service('apmy');
+else dbms_service.start_service('asby');
+end if;
+null;
+end;
+/
+
+And in PDBB:
+
+create or replace trigger start_services after startup on database
+declare drole varchar2(20);
+begin
+select database_role into drole from v$database;
+if drole='PRIMARY' then dbms_service.start_service('bpmy');
+else dbms_service.start_service('bsby');
+end if;
+null;
+end;
+/
+
+Note that in a GI environment, the services would usually be registered within the OCR.
+
+Close and open the PDBs in both primary and standby.
+What services are registered with the listener now?
+
+-----------------------------------------------------------------------------------------------------------
+This is how it looks :
+
+[oracle@ip-172-30-4-41 dbs]$ lsnrctl status
+
+LSNRCTL for Linux: Version 19.0.0.0.0 - Production on 06-DEC-2023 19:14:08
+
+Copyright (c) 1991, 2019, Oracle.  All rights reserved.
+
+Connecting to (ADDRESS=(PROTOCOL=tcp)(HOST=)(PORT=1521))
+STATUS of the LISTENER
+------------------------
+Alias                     LISTENER
+Version                   TNSLSNR for Linux: Version 19.0.0.0.0 - Production
+Start Date                06-DEC-2023 14:06:03
+Uptime                    0 days 5 hr. 8 min. 4 sec
+Trace Level               off
+Security                  ON: Local OS Authentication
+SNMP                      OFF
+Listener Parameter File   /u01/app/oracle/product/19.0.0/dbhome_1/network/admin/listener.ora
+Listener Log File         /u01/app/oracle/diag/tnslsnr/ip-172-30-4-41/listener/alert/log.xml
+Listening Endpoints Summary...
+  (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=ip-172-30-4-41.ec2.internal)(PORT=1521)))
+Services Summary...
+Service "0bc94c2c13185e75e065102d5dea84c1" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "0bc96de12b195ee8e065102d5dea84c1" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "apmy" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "asby" has 1 instance(s).
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "bpmy" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "bsby" has 1 instance(s).
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "cdba" has 2 instance(s).
+  Instance "cdba", status UNKNOWN, has 1 handler(s) for this service...
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "cdbaXDB" has 1 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+Service "cdbb" has 2 instance(s).
+  Instance "cdbb", status UNKNOWN, has 1 handler(s) for this service...
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "cdbbXDB" has 1 instance(s).
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "orcl" has 1 instance(s).
+  Instance "orcl", status READY, has 1 handler(s) for this service...
+Service "orclXDB" has 1 instance(s).
+  Instance "orcl", status READY, has 1 handler(s) for this service...
+Service "pdba" has 2 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+Service "pdbb" has 2 instance(s).
+  Instance "cdba", status READY, has 1 handler(s) for this service...
+  Instance "cdbb", status READY, has 1 handler(s) for this service...
+The command completed successfully
+[oracle@ip-172-30-4-41 dbs]$
+
+--------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+Add these entries to the tnsnames file and try them:
+
+dmla =
+(description =
+  (address_list=
+        (failover=on)(load_balance=on)
+        (address=(protocol=tcp)(host=127.0.0.1)(port=1521))
+        (address=(protocol=tcp)(host=127.0.0.2)(port=1521))
+  )
+  (connect_data=(service_name=apmy)))
+  )
+
+repa =
+(description=
+  (address_list=
+        (failover=on)(load_balance=on)
+        (address=(protocol=tcp)(host=127.0.0.1)(port=1521))
+        (address=(protocol=tcp)(host=127.0.0.2)(port=1521))
+  )
+  (connect_data=(service_name=asby)))
+  )
+
+
+dmlb =
+(description =
+  (address_list=
+        (failover=on)(load_balance=on)
+        (address=(protocol=tcp)(host=127.0.0.1)(port=1521))
+        (address=(protocol=tcp)(host=127.0.0.2)(port=1521))
+  )
+  (connect_data=(service_name=bpmy)))
+  )
+
+repb =
+(description=
+  (address_list=
+        (failover=on)(load_balance=on)
+        (address=(protocol=tcp)(host=127.0.0.1)(port=1521))
+        (address=(protocol=tcp)(host=127.0.0.2)(port=1521))
+  )
+  (connect_data=(service_name=bsby)))
+  )
+
+Which PDB in which database do they take you to? Is it read write or read only?
+
+------------------------------------------------
+
+dmla  - Primary - PDBA
+repa  - Standby - PDBA
+
+dmlb  - Primary - PDBB
+repa  - Standby - PDBB
+
+-------------------------------------------------
+
+
+
+
+
+
+
+
+
+10.	Create more PDBs
+
+In cdbb, limit the PDBs that will be maintained:
+alter system set enabled_pdbs_on_standby=pdba,pdbb,pdbd;
+
+In cdba, create two PDBs:
+
+create pluggable database pdbc admin user pdbc_admin identified by oracle standbys=none;
+create pluggable database pdbd admin user pdbd_admin identified by oracle standbys=all;
+
+In each CDB:
+alter pluggable database all open;
+select name,open_mode from v$pdbs;
+
+(Note: when running on non-OCI cloud environments Oracle may limit the number of PDBs you can
+have, irrespective of the max_pdbs setting, resulting in ORA-65010 errors. Setting this:
+
+alter system set "_cdb_disable_pdb_limit"=true scope=spfile;
+
+and re-starting may help).
+
+
+11.	Plug in a non-CDB by network cloning
+
+11.1	Configure the non-CDB orcl:
+
+. oraenv 
+orcl
+sqlplus / as sysdba
+shutdown immediate
+startup open read only
+
+Grant the necessary permission to SYSTEM in orcl:
+grant create pluggable database to system;         ----------------> Grant this before you open db in read only mode
+
+11.2	In the primary's root container create a database link to orcl:
+
+create database link to_orcl connect to system identified by oracle using '127.0.0.1:1521/orcl';
+
+11.3	In the standby enable Active Data Guard, but only for the root and seed containers:
+
+alter database recover managed standby database cancel;
+shutdown immediate;
+startup;
+show pdbs
+alter pluggable database all close immediate;
+show pdbs
+alter database recover managed standby database using current logfile disconnect from session;
+
+set the parameter to allow copying the orcl datafiles to create the standby container:
+alter system set standby_pdb_source_file_dblink=to_orcl;
+
+11.4	In the primary, clone the non-CDB to a PDB:
+
+create pluggable database orcldg from orcl@to_orcl;
+
+While this is in progress, tail the alert logs of the primary and the standby.
+
+Once the clone is complete, open  in the primary. It will open in restricted mode.  - after clone completed - it's in mounted state
+It will not be possible to open it in the standby (feel free to try).
+
+----------------------------------------------------------------------------------
+
+SQL> create pluggable database orcldg from orcl@to_orcl;
+
+Pluggable database created.
+
+SQL> show pdbs
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 PDBA                           READ WRITE NO
+         4 PDBB                           READ WRITE NO
+         5 PDBC                           READ WRITE NO
+         6 PDBD                           READ WRITE NO
+         7 ORCLDG                         MOUNTED
+SQL>
+
+SQL> alter pluggable database orcldg open;
+
+Warning: PDB altered with errors.
+
+SQL> show pdbs
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 PDBA                           READ WRITE NO
+         4 PDBB                           READ WRITE NO
+         5 PDBC                           READ WRITE NO
+         6 PDBD                           READ WRITE NO
+         7 ORCLDG                         READ WRITE YES
+SQL>
+-----------------------------------------------------------------------------------
+
+Complete the conversion to a PDB in the primary:
+
+alter session set container=orcldg;
+@?/rdbms/admin/noncdb_to_pdb.sql
+shu immediate;
+startup;
+
+orcldg will open read write unrestricted in the primary,
+and can be opened read only in the standby.
+
+
+-------------------------------------------------------------------------------------------------
+
+SQL> show pdbs
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 PDBA                           MOUNTED
+         4 PDBB                           MOUNTED
+         5 PDBC                           MOUNTED
+         6 PDBD                           MOUNTED
+         7 ORCLDG                         MOUNTED
+SQL> alter pluggable database all open;
+alter pluggable database all open
+*
+ERROR at line 1:
+ORA-01111: name for data file 25 is unknown - rename to correct file
+
+
+SQL> show pdbs
+
+    CON_ID CON_NAME                       OPEN MODE  RESTRICTED
+---------- ------------------------------ ---------- ----------
+         2 PDB$SEED                       READ ONLY  NO
+         3 PDBA                           READ ONLY  NO
+         4 PDBB                           READ ONLY  NO
+         5 PDBC                           MOUNTED
+         6 PDBD                           READ ONLY  NO
+         7 ORCLDG                         READ ONLY  NO
+SQL>
+
+------------------------------------------------------------------------------------------------------
+
+12.	Tidy up
+
+In cdba, clear the dataguard parameters:
+
+alter system reset db_file_name_convert;
+alter system reset log_file_name_convert;
+alter system reset fal_server;
+alter system reset fal_client;
+alter system reset log_archive_config;
+alter system reset standby_file_management;
+alter system reset log_archive_dest_2;
+startup force
+
+Drop the cdbb physical standby:
+
+sqlplus / as sysdba
+shutdown abort
+startup mount exclusive;
+alter system enable restricted session;
+drop database;
+
+
+
+
+
+
+

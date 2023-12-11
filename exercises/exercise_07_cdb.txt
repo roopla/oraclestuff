@@ -1,0 +1,119 @@
+Exercise: chapter 7, security
+
+Unified Audit and Transparent Data Encryption with Multitenant
+
+1.	Unified Audit
+
+1.1	What policies are enabled in which containers?
+
+In the root container:
+
+select con_id,policy_name from containers(audit_unified_enabled_policies);
+select con_id,unified_audit_policies,count(*) from cdb_unified_audit_trail group by con_id,unified_audit_policies;
+
+1.2	Configure a policy
+
+In the root container:
+
+create audit policy sel_any privileges select any table container=all;
+audit policy sel_any;
+select con_id,policy_name from containers(audit_unified_enabled_policies);
+audit policy sel_any;
+
+--It may be necessary to open/close the containers before the policy is properly propagated
+
+Attempt to disable in a pluggable container:
+connect system/oracle@pdbf
+select con_id,policy_name from containers(audit_unified_enabled_policies);
+select * from work.t1;
+noaudit policy sel_any;
+
+
+1.3	Check out some records
+
+In the root container:
+
+select con_id,dbusername,sql_text from cdb_unified_audit_trail where unified_audit_policies='SEL_ANY';
+select con_id,dbusername,return_code,sql_text from cdb_unified_audit_trail where sql_text like '%sel_any%';
+
+
+2.	Transparent Data Encryption (United Mode)
+
+2.1	Create the wallet
+
+Create the root directory:
+mkdir /u01/wallets
+
+And set the parameters in the root container:
+
+connect / as sysdba
+alter system set wallet_root='/u01/wallets' scope=spfile;
+startup force;
+alter system set tde_configuration="keystore_configuration=file";
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+
+Create the an auto-login keystore:
+
+administer key management create keystore identified by oracle;
+!ls -l /u01/wallets/tde
+administer key management create auto_login keystore from keystore '/u01/wallets/tde'identified by oracle;
+!ls -l /u01/wallets/tde
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+
+2.2	Set the master keys
+
+In the root,
+administer key management set key force keystore identified by oracle with backup using 'rootkey';
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+select con_id,encryptionalg,masterkey_activated from  v$database_key_info;
+
+And in pdba,
+
+administer key management set key force keystore identified by oracle with backup using 'pdbakey';
+select con_id,wallet_type,keystore_mode,status from v$encryption_wallet;
+select * from  v$database_key_info;
+!ls -l /u01/wallets/tde
+
+2.3 Create an encrypted tablespace in a PDB
+
+In pdba,
+create tablespace encts datafile size 10m encryption using 'aes256' encrypt;
+select * from  v$encrypted_tablespaces;
+create table t1 tablespace encts as select * from all_users;
+
+2.4	Clone the PDB with the encrypted tablespace
+
+In the root container:
+
+create pluggable database pdba_clone from pdba;
+create pluggable database pdba_clone from pdba keystore identified by oracle;
+alter pluggable database pdba_clone open;
+select * from  v$encrypted_tablespaces;
+
+
+Note that some releases/platforms have a limit of 5 containers. If you hit this, there is a workaround:
+alter system set "_cdb_disable_pdb_limit" = true scope=spfile;
+and restart the database.
+
+
+2.5	Unplug and plug back in a PBD with an encrypted tablespace
+
+In the root container:
+
+alter pluggable database pdba_clone close immediate;
+alter pluggable database pdba_clone unplug into '/home/oracle/pdba_clone.xml';
+alter pluggable database pdba_clone unplug into '/home/oracle/pdba_clone.xml' encrypt using pdbakey;
+
+Open the /home/oracle/pdba_clone.xml file to see <tdekeys> tag (and some other interesting stuff, too)
+
+drop pluggable database pdba_clone keep datafiles;
+select con_id,name,open_mode from v$pdbs;
+
+create pluggable database pdba_replugged using '/home/oracle/pdba_clone.xml' nocopy
+keystore identified by oracle decrypt using pdbakey;
+select con_id,name,open_mode from v$pdbs;
+
+alter session set container=pdba_replugged;
+alter database open;
+select tablespace_name,encrypted from dba_tablespaces;
+

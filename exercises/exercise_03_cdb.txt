@@ -1,0 +1,171 @@
+Exercise: chapter 3, Creating container databases and pluggable databases
+
+Use various techniques to create and convert to/from pluggable databases
+
+Starting point: orcl is shutdown, cdba is an open container database with no pluggable databases
+End point: the CDB and three PDBs are open
+
+Note: you may hit "ORA-65010: maximum number of pluggable databases created".
+If so,
+alter system set "_cdb_disable_pdb_limit" = TRUE scope=spfile;
+startup force
+alter system set max_pdbs=10;
+
+
+1.	Create a PDB from seed
+
+1.1	Source the oraenv script, provide cdba as the database name
+
+. oraenv
+cdba
+
+1.2	Connect to the root container service as sys
+
+sqlplus sys/oracle@127.0.0.1:1521/cdba as sysdba
+select * from session_privs where privilege='CREATE PLUGGABLE DATABASE';
+
+1.3	Create a pluggable database from the seed
+
+create pluggable database pdba admin user pdba_admin identified by oracle;
+select * from v$pdbs;
+select * from v$tablespace;
+select con_id,name from v$datafile;
+select con_id,name from v$tempfile;
+select tablespace_name from dba_tablespaces;
+select tablespace_name,con_id from cdb_tablespaces;
+
+1.4	Open and connect to the new pluggable database
+
+alter pluggable database pdba open;
+column username format a30
+select con_id,username,common,oracle_maintained from cdb_users;
+connect pdba_admin/oracle@127.0.0.1:1521/pdba
+select * from session_privs;
+select * from session_roles;
+connect system/oracle@127.0.0.1:1521/pdba
+select * from v$tablespace;
+select tablespace_name from dba_tablespaces;
+select tablespace_name,con_id from cdb_tablespaces;
+
+
+2	Clone a PDB within the CDB
+
+sqlplus sys/oracle@127.0.0.1:1521/cdba as sysdba
+select * from v$containers;
+select name,open_mode,db_unique_name,cdb,dbid,con_dbid from v$database;
+create pluggable database pdbb from pdba;
+select * from cdb_pdbs;
+select * from v$pdbs;
+alter pluggable database all open;
+select con_id,name,guid,open_mode from v$containers;
+
+lsnrctl status
+
+
+3	Plug a non-CDB into the CDB
+
+3.1	Prepare the orcl database for plugging in
+
+. oraenv
+orcl
+sqlplus / as sysdba
+startup
+shu immediate
+startup open read only;
+exec dbms_pdb.describe('/home/oracle/orcl.xml')
+shu immediate
+
+3.2	Plug the orcl database into the cdba container database
+
+. oraenv
+cdba
+sqlplus / as sysdba
+create pluggable database orcl using '/home/oracle/orcl.xml' copy;
+select name,open_mode from v$containers;
+alter pluggable database all open;
+select * from pdb_plug_in_violations;
+
+
+3.3	Run the conversion to PDB script while connected to the orcl container
+
+sqlplus sys/oracle@127.0.0.1:1521/cdba as sysdba
+show con_name
+alter session set container=orcl;
+show con_name
+@?/rdbms/admin/noncdb_to_pdb.sql
+(approx 12 minutes, mostly running utlrp, though it has been known to take twice as long....)
+
+
+4.	Unplug and drop a PDB
+
+4.1	Unplug the orcl PDB
+
+conn / as sysdba
+alter pluggable database orcl close immediate;
+alter pluggable database orcl unplug into '/tmp/orcl_unplugged.xml';
+select * from cdb_pdbs;
+
+4.2	Drop the orcl PDB, including datafiles
+
+select * from v$tablespace;
+drop pluggable database orcl including datafiles;
+select * from v$tablespace;
+show pdbs;
+
+
+5.	Make a hot remote clone of the orcl database
+
+5.1	Prepare the orcl database for hot cloning
+
+. oraenv	orcl
+sqlplus / as sysdba
+startup mount
+alter database archivelog;
+alter database open;
+create user pdbadmin identified by pdbadmin;
+grant create session,create pluggable database to pdbadmin;
+
+
+5.2	Plug in the orcl database
+
+. oraenv	cdba
+sqlplus / as sysdba
+create database link orcl connect to pdbadmin identified by pdbadmin using '127.0.0.1:1521/orcl';
+create pluggable database pdbf from orcl@orcl;
+sho pdbs
+
+alter pluggable database pdbf open;
+select * from containers(pdb_plug_in_violations);
+
+Repeat step 3.3 for container pdbf to complete the process.
+
+
+
+6.	Configure Oracle Net
+
+Check that the database listener is listening for the PDB services:
+
+lsnrctl services
+
+Add these entries to $ORACLE_HOME/network/admin/tnsnames.ora,
+
+cdba=(description=(address=(protocol=tcp)(host=127.0.0.1)(port=1521))(connect_data=(service_name=cdba)))
+pdba=(description=(address=(protocol=tcp)(host=127.0.0.1)(port=1521))(connect_data=(service_name=pdba)))
+pdbb=(description=(address=(protocol=tcp)(host=127.0.0.1)(port=1521))(connect_data=(service_name=pdbb)))
+pdbf=(description=(address=(protocol=tcp)(host=127.0.0.1)(port=1521))(connect_data=(service_name=pdbf)))
+
+
+Test the Oracle Net service names:
+
+sqlplus sys/oracle@cdba as sysdba
+select name from v$database;
+select * from global_name;
+
+conn sys/oracle@pdba as sysdba
+select name from v$database;
+select * from global_name;
+
+conn sys/oracle@pdbb as sysdba
+select instance_name from v$instance;
+select service_name from v$session where sid=(select max(sid) from v$mystat);
+

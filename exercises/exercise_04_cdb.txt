@@ -1,0 +1,230 @@
+Exercise: chapter 4, Multitenant administration
+
+Startup and shutdown; tablespaces; users and roles; undo management
+
+
+1.	Confirm that the PDBs are open, and all containers registered with the listener
+
+lsnrctl status
+This should show dynamically registered services for cdba, pdba, and pdbb
+
+Connect to the root container AS SYSDBA, and:
+select * from v$pdbs;
+select * from v$containers;
+select name,con_id from v$active_services;     ----> why XDB service is only running at container level
+
+
+2.	Move your session from one container to another
+
+select sys_context('userenv','cdb_name') from dual;
+select sys_context('userenv','con_name') from dual;
+select sys_context('userenv','con_id') from dual;
+select name from dba_services;
+select name from cdb_services;
+show con_name
+show parameter name
+
+alter session set container=pdba;
+
+--repeat the queries above. What and why are the differences?
+
+
+3.	Startup and shutdown pluggable databases
+
+alter session set container=cdb$root;
+alter pluggable database all close;
+select * from v$containers;
+
+alter pluggable database all open;
+select * from v$containers;
+
+alter session set container=pdba;
+shu immediate;
+select name,open_mode from v$database;
+alter session set container=pdbb;
+select name,open_mode from v$database;
+
+alter session set container=cdb$root;
+alter pluggable database all except pdba close immediate;
+select * from v$pdbs;
+alter pluggable database all except pdbb open;
+select * from v$pdbs;
+
+
+4	Automate the opening of all the containers
+
+In the root container, create and test this trigger:
+
+create trigger open_pdbs after startup on database
+begin
+execute immediate 'alter pluggable database all open';
+end;
+/
+
+startup force
+select name,open_mode from v$containers;
+
+
+5	Create default temporary and permanent tablespaces in each PDB
+
+connect system/oracle@pdba
+create tablespace def_perm_a datafile size 10m;
+create temporary tablespace def_temp_a tempfile size 10m;
+alter database default temporary tablespace def_temp_a;
+alter database default tablespace def_perm_a;
+select * from database_properties where property_name like '%TABLESPACE';
+
+connect system/oracle@pdbb
+create tablespace def_perm_b datafile size 10m;
+create temporary tablespace def_temp_b tempfile size 10m;
+alter database default temporary tablespace def_temp_b;
+alter database default tablespace def_perm_b;
+select * from database_properties where property_name like '%TABLESPACE';
+
+connect system/oracle@cdba
+select * from database_properties where property_name like '%TABLESPACE';
+
+col cname for a10
+col tname for a10
+col dname for a70
+set lin 110
+set pages 100
+select c.name cname,ts#,t.name tname,d.name dname
+from
+v$containers c join v$tablespace t using(con_id) join v$datafile d using (ts#,con_id)
+union all 
+select c.name cname,ts#,t.name tname,d.name dname
+from
+v$containers c join v$tablespace t using(con_id) join v$tempfile d using (ts#,con_id)
+order by 1,2;
+
+
+Why these results?
+
+
+6	Common and local users
+
+conn system/oracle@cdba
+col username for a30
+select con_id,username,common,oracle_maintained from cdb_users order by 1,2;
+select con_id,username,common,oracle_maintained from cdb_users order by 2,1;
+select con_id,username,common,oracle_maintained from cdb_users order by 3 desc,2,1;
+
+create user user1 identified by oracle;
+create user c##user1 identified by oracle;
+show parameter common_user_prefix
+create user c##user2 identified by oracle container=current;
+create user c##user2 identified by oracle container=all;
+grant dba to c##user1;
+grant dba to c##user2 container=all;
+
+
+conn c##user1/oracle@cdba;
+conn c##user1/oracle@pdba;    - This won't work since dba role only granted in cdba not for all containers
+conn c##user2/oracle@pdba;
+
+create user locala identified by oracle container=current;
+grant dba to locala;
+connect locala/oracle@pdba
+select * from session_roles;
+
+What are the rules for creating common and local users?
+
+
+7.	Common and local roles
+
+conn system/oracle@cdba
+select role,common,oracle_maintained,con_id from cdb_roles order by role;
+
+create role myrole1 container=current;
+create role c##myrole1 container=current;
+create role c##myrole1 container=all;
+create role c##myrole2 container=all;
+
+grant c##myrole1 to c##user2 container=all;
+grant c##myrole2 to c##user2 container=pdba;
+conn system/oracle@pdba
+grant c##myrole2 to c##user2 container=current;
+
+conn system/oracle@cdba
+select grantee,granted_role,common,con_id from cdb_role_privs
+where grantee like 'C##%' order by 1,2,3;
+
+conn c##user2/oracle@pdba
+select * from session_roles;
+
+What syntax is valid for local and common roles?
+
+
+8.	Services
+
+Create and manage services in the PDBs:
+
+conn system/oracle@pdba
+execute dbms_service.create_service('as1','as1')
+execute dbms_service.start_service('as1')
+
+conn system/oracle@pdbb
+select name from dba_services;
+execute dbms_service.create_service('as1','as1')
+execute dbms_service.create_service('bs1','bs1')
+execute dbms_service.start_service('bs1')
+select name,con_id from v$active_services;
+
+conn system/oracle@cdba
+select name,con_id from v$active_services;
+execute dbms_service.stop_service('as1')
+
+I can't stop the service;
+
+SQL> show con_name;
+
+CON_NAME
+------------------------------
+CDB$ROOT
+SQL> execute dbms_service.stop_service('as1');
+BEGIN dbms_service.stop_service('as1'); END;
+
+*
+ERROR at line 1:
+ORA-44786: Service operation cannot be completed.
+ORA-06512: at "SYS.DBMS_SERVICE_ERR", line 91
+ORA-06512: at "SYS.DBMS_SERVICE", line 519
+ORA-06512: at line 1
+
+
+lsnrctl status
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
